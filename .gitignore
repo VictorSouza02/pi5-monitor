@@ -1,0 +1,4 @@
+native/pi5mon
+native/index_gz.h
+*.o
+pi/authorized_keys.line
