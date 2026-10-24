@@ -21,7 +21,7 @@ Design goals:
 CPU (total, per core, clock, load), CPU and RP1 temperature, fan, throttling and
 under-voltage flags (`vcgencmd get_throttled`), memory, cache and zram swap, network rate per
 interface, a storage donut like Dokploy's (Docker images, containers, volumes, build cache,
-system cache, system, free; the Docker part is measured on demand and cached), disk I/O rate, uptime, process and thread counts, Docker containers (CPU %
+system cache, system, free; the Docker part is measured on demand and cached), disk I/O rate, uptime, process and thread counts, Docker containers sorted A-Z (CPU %
 of one core and anonymous memory, read straight from cgroup v2, no Docker API) and the top 10
 processes by CPU. Sparklines keep the samples of the current session only.
 

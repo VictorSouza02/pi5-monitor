@@ -442,11 +442,14 @@ static int run_ssh(const char* host, const char* req, buf_t* out, char* err, siz
 
 static int cmp_pid(const void* x, const void* y) { return ((const proc_t*)x)->pid - ((const proc_t*)y)->pid; }
 
-typedef struct { int i; double cpu; unsigned long long mem; } rank_t;
+typedef struct { int i; double cpu; unsigned long long mem; const char* nm; } rank_t;
 static int cmp_rank(const void* x, const void* y) { /* CPU desc, then memory desc */
     const rank_t *a = x, *b = y;
     if (a->cpu != b->cpu) return a->cpu < b->cpu ? 1 : -1;
     return a->mem < b->mem ? 1 : a->mem > b->mem ? -1 : 0;
+}
+static int cmp_name(const void* x, const void* y) { /* container name A-Z, case-insensitive */
+    return strcasecmp(((const rank_t*)x)->nm, ((const rank_t*)y)->nm);
 }
 
 static double pct(unsigned long long d, unsigned long long all) { return all ? 100.0 * (double)d / (double)all : 0; }
@@ -477,7 +480,7 @@ static void emit_rates(buf_t* o, fast_t* p, fast_t* c, slow_t* sl) {
         b_str(o, c->disks[i].name);
         b_printf(o, ",%.0f,%.0f]", rd * 512.0 / dt, wr * 512.0 / dt);
     }
-    /* Containers: % of one core, like `docker stats`. Memory = anon (from the first sample). */
+    /* Containers, A-Z by name: % of one core, like `docker stats`. Memory = anon (from the first sample). */
     b_puts(o, "],\"dk\":[");
     static rank_t rk[MAX_PROC];
     int nr = 0;
@@ -486,16 +489,16 @@ static void emit_rates(buf_t* o, fast_t* p, fast_t* c, slow_t* sl) {
         for (int j = 0; j < p->ndk; j++)
             if (!strcmp(p->dks[j].id, c->dks[i].id)) { cpu = (double)(c->dks[i].usec - p->dks[j].usec) / (dt * 1e4); break; }
         rk[nr].i = i; rk[nr].cpu = cpu; rk[nr].mem = 0;
+        rk[nr].nm = name_of(c->dks[i].id);
+        if (!rk[nr].nm) rk[nr].nm = c->dks[i].id;
         for (int j = 0; j < g_a.ndk; j++) if (!strcmp(g_a.dks[j].id, c->dks[i].id)) { rk[nr].mem = g_a.dks[j].anon; break; }
         nr++;
     }
-    qsort(rk, (size_t)nr, sizeof rk[0], cmp_rank);
+    qsort(rk, (size_t)nr, sizeof rk[0], cmp_name);
     for (int k = 0; k < nr; k++) {
-        dk_t* d = &c->dks[rk[k].i];
         unsigned long long anon = rk[k].mem;
-        const char* nm = name_of(d->id);
         b_printf(o, "%s[", k ? "," : "");
-        b_str(o, nm ? nm : d->id);
+        b_str(o, rk[k].nm);
         b_printf(o, ",%.1f,%llu]", rk[k].cpu, anon);
     }
     /* Top processes by CPU over the interval (% of one core, like top). */
