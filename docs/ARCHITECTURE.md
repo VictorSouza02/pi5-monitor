@@ -31,6 +31,12 @@ extracted from the device's dyld cache for Spotipad). One thread, one request at
   is cached in `<dir>/disk-<ip>.json` and only remeasured on "Measure again" (force=1) or when
   no file exists. The page combines it with the live `df` of `/` from every refresh:
   System & other = used - Docker - system cache, Free = total - used.
+- **Local cache.** Every successful `/api/stats` reply is saved as `<dir>/last-<ip>.json` (with
+  `"at"`, epoch s) and appends one line `t,cpu%,mem%,temp,rx/s,tx/s,load1` to `<dir>/hist-<ip>.csv`.
+  Past 200 KB (~4000 samples) the oldest half is dropped. `GET /api/cache?h=<ip>` returns
+  `{last, hist: [[t,cpu,mem,temp,rx,tx,load1], ...] (newest 600), disk}` from these files without
+  touching the Pi. Nothing is sampled while the app is closed, so history only covers the times
+  it was open.
 - **Scan.** `GET /api/scan?k=<ip,ip>`: waits up to 3 s for en0 to get its address (app opened
   right after wake-up), then non-blocking `connect()` to port 22 on all hosts of the /24 at once
   (RLIMIT_NOFILE raised to 1024), 2.5 s deadline. Known Pis (`k`, the IPs the page has opened
@@ -63,7 +69,8 @@ collector, ~35-50 ms per refresh including the dropbear session and its journald
 
 ES5 only (Safari 9), no libraries, fonts or images. Modern dark theme: SVG ring gauges (CPU, memory, temperature 25-85 C) and an SVG donut for storage, updated through `stroke-dasharray` only. Static skeleton; updates touch only
 `textContent` and style widths, table rows are reused. Sparklines are canvas ring buffers of
-90 samples, cleared when leaving the device. One request in flight at most; polling (1/5/30/60 s) uses a
+120 samples, seeded from `/api/cache` when a Pi is opened (with the last reply rendered greyed
+until the live refresh); a dashed line marks gaps over 10 minutes between samples. One request in flight at most; polling (1/5/30/60 s) uses a
 `setTimeout` chain timed from the start of the previous request, armed only after its reply. At
 60 s the daemon has exited (40 s idle), so each sample is a fresh double sample. `visibilitychange`/`pagehide` abort the request
 and set polling to Off; becoming visible again does one refresh. `localStorage` keeps only the

@@ -24,6 +24,8 @@ body{min-height:100vh;color:#eef0f6;font:15px/1.35 -apple-system,"Helvetica Neue
 .sub{font-size:13px;color:#8b91a7;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:#3ddc97;margin:0 8px 3px 0;vertical-align:middle;box-shadow:0 0 0 3px rgba(61,220,151,.18)}
 .dot.off{background:#f25f7a;box-shadow:0 0 0 3px rgba(242,95,122,.18)}
+.dot.old{background:#8b91a7;box-shadow:0 0 0 3px rgba(139,145,167,.18)}
+.stale .grid{opacity:.55}
 .ib{width:42px;height:42px;border-radius:21px;border:0;background:rgba(255,255,255,.07);color:#eef0f6;margin-left:10px;-webkit-flex:none;flex:none}
 .ib:active{background:rgba(255,255,255,.14)}
 .ib svg{width:20px;height:20px;display:block;margin:auto}
@@ -241,6 +243,7 @@ td .meter{width:54px;display:inline-block;vertical-align:middle;margin-left:8px;
       <div class="kv"><span>Boot partition</span><b id="boot">&ndash;</b></div>
       <div class="kv"><span>Sample window</span><b id="win">&ndash;</b></div>
       <div class="kv"><span>SSH round trip</span><b id="rtt">&ndash;</b></div>
+      <div class="kv"><span>Chart history</span><b id="hist">&ndash;</b></div>
     </div>
 
     <div class="card w3 lw2">
@@ -258,7 +261,7 @@ td .meter{width:54px;display:inline-block;vertical-align:middle;margin-left:8px;
 (function () {
 "use strict";
 var $ = function (id) { return document.getElementById(id); };
-var LS = window.localStorage, HIST = 90, RING = 351.86, DONUT = 452.39;
+var LS = window.localStorage, HIST = 120, GAP = 600, RING = 351.86, DONUT = 452.39;
 var host = null, period = 0, started = 0, timer = 0, xhr = null, busy = false, hist = {}, nodes = {}, disk = null, lastDf = null, diskBusy = false;
 var COL = { ok: "#3ddc97", warn: "#ffbe50", bad: "#f25f7a" };
 var SEG = [["img", "Docker images", "#4c8dff"], ["ctr", "Docker containers", "#3ddc97"], ["vol", "Docker volumes", "#ffbe50"],
@@ -300,8 +303,14 @@ function level(v, w, b) { return v >= b ? "bad" : v >= w ? "warn" : "ok"; }
 function meter(m, p, cls) { p = Math.max(0, Math.min(100, p)); m.style.width = p + "%"; m.style.background = COL[cls || "ok"]; }
 function ring(id, p) { p = Math.max(0, Math.min(100, p)); el(id).setAttribute("stroke-dasharray", (p * RING / 100).toFixed(1) + " " + RING); }
 
-/* sparklines: session-only ring buffers; series = [[values, color], ...] */
+/* sparklines: ring buffers kept by the daemon (hist-<ip>.csv), so a reopen continues the old lines;
+   hist.t = sample times (s), a dashed line marks breaks longer than GAP; series = [[values, color], ...] */
 function push(k, v) { var a = hist[k] || (hist[k] = []); a.push(v); if (a.length > HIST) a.shift(); return a; }
+var HK = ["t", "cpu", "mem", "temp", "rx", "tx"];
+function loadHist(rows) {
+  hist = {};
+  for (var i = Math.max(0, rows.length - HIST); i < rows.length; i++) for (var k = 0; k < HK.length; k++) push(HK[k], rows[i][k]);
+}
 function spark(id, series, max, auto) {
   var c = el(id), r = window.devicePixelRatio || 1, w = c.clientWidth, h = c.clientHeight, i, s;
   if (!w) return;
@@ -315,7 +324,12 @@ function spark(id, series, max, auto) {
     for (s = 0; s < series.length; s++) for (i = 0; i < series[s][0].length; i++) { var v = series[s][0][i]; if (v > hi) hi = v; if (auto && v < lo) lo = v; }
     if (auto) { lo -= 2; hi += 2; } else hi = hi * 1.15 || 1;
   }
-  var step = w / (HIST - 1);
+  var step = w / (HIST - 1), t = hist.t || [];
+  g.strokeStyle = "rgba(255,255,255,.22)"; g.lineWidth = 1;
+  for (i = 1; i < t.length; i++) if (t[i] - t[i - 1] > GAP) {
+    var gx = Math.round(w - (t.length - 1 - i + 0.5) * step) + 0.5;
+    for (var gy = 0; gy < h; gy += 5) { g.beginPath(); g.moveTo(gx, gy); g.lineTo(gx, Math.min(h, gy + 2.5)); g.stroke(); }
+  }
   for (s = 0; s < series.length; s++) {
     var a = series[s][0];
     if (a.length < 2) continue;
@@ -349,13 +363,18 @@ var THR = [[0, "Under-voltage", "bad"], [1, "Freq capped", "warn"], [2, "Throttl
 
 function clock() { var t = new Date(), p = function (n) { return (n < 10 ? "0" : "") + n; }; return p(t.getHours()) + ":" + p(t.getMinutes()) + ":" + p(t.getSeconds()); }
 
-function render(d) {
-  var i, a;
-  names[d.ip] = d.host; store("names", names);
-  snap[d.ip] = { t: Date.now(), cpu: d.cpu, temp: d.temp, mem: d.mem[0] ? (d.mem[0] - d.mem[1]) * 100 / d.mem[0] : 0 }; store("snap", snap);
+/* cached: the daemon's last saved reply (d.at = epoch s), shown greyed until the live one arrives */
+function render(d, cached) {
+  var i, a, live = !cached;
+  if (live) {
+    names[d.ip] = d.host; store("names", names);
+    snap[d.ip] = { t: Date.now(), cpu: d.cpu, temp: d.temp, mem: d.mem[0] ? (d.mem[0] - d.mem[1]) * 100 / d.mem[0] : 0 }; store("snap", snap);
+    push("t", Date.now() / 1000);
+  }
   txt("hName", d.host);
-  el("dot").className = "dot";
-  txt("meta", d.ip + " · up " + dur(d.up) + " · updated " + clock());
+  el("dot").className = live ? "dot" : "dot old";
+  el("vMon").className = live ? "" : "stale";
+  txt("meta", d.ip + " · up " + dur(d.up) + (live ? " · updated " + clock() : " · from " + ago(Date.now() / 1000 - d.at) + ", refreshing…"));
 
   txt("cpu", d.cpu.toFixed(0)); ring("rCpu", d.cpu);
   txt("load", "load " + d.load[0].toFixed(2) + " · " + d.load[1].toFixed(2) + " · " + d.load[2].toFixed(2));
@@ -368,14 +387,14 @@ function render(d) {
     cb.innerHTML = h;
   }
   for (i = 0; i < d.cores.length; i++) meter(cb.children[i].firstChild.firstChild, d.cores[i], level(d.cores[i], 60, 85));
-  push("cpu", d.cpu);
+  if (live) { push("cpu", d.cpu); }
 
   var mt = d.mem[0], used = mt - d.mem[1], mp = mt ? used * 100 / mt : 0;
   txt("mem", mp.toFixed(0)); ring("rMem", mp);
   txt("memU", size(used) + " used"); txt("memT", size(mt));
   txt("memC", size(d.mem[2]));
   txt("swap", d.swap[0] ? size(d.swap[1]) + " / " + size(d.swap[0]) : "none");
-  push("mem", mp);
+  if (live) { push("mem", mp); }
 
   txt("temp", d.temp.toFixed(1)); ring("rTemp", (d.temp - 25) * 100 / 60); /* ring spans 25-85 C */
   el("rTemp").setAttribute("stroke", d.temp >= 80 ? COL.bad : d.temp >= 65 ? COL.warn : "url(#gt)");
@@ -387,12 +406,12 @@ function render(d) {
   if (!fl.length) fl.push("<span>No throttling</span>");
   fl = fl.join("");
   if (nodes.flagsHtml !== fl) { el("flags").innerHTML = fl; nodes.flagsHtml = fl; }
-  push("temp", d.temp);
+  if (live) { push("temp", d.temp); }
 
   var rx = 0, tx = 0, it = [];
   for (i = 0; i < d.net.length; i++) { a = d.net[i]; rx += a[1]; tx += a[2]; it.push([a[0], "↓ " + rate(a[1]) + "   ↑ " + rate(a[2])]); }
   txt("rx", rate(rx)); txt("tx", rate(tx));
-  push("rx", rx); push("tx", tx);
+  if (live) { push("rx", rx); push("tx", tx); }
   kvs("ifs", it);
 
   lastDf = null;
@@ -411,6 +430,8 @@ function render(d) {
   txt("ndk", String(d.dk.length));
   txt("win", d.dt.toFixed(1) + " s" + (d.mode === "double" ? " (fresh)" : ""));
   txt("rtt", d.ssh_ms + " ms");
+  a = hist.t || [];
+  txt("hist", a.length ? a.length + " samples · since " + ago(Date.now() / 1000 - a[0]) : "–");
 
   var tb = el("tDk"), r;
   rows(tb, d.dk.length, 3, function (tr) { tr.cells[0].className = "n"; tr.cells[1].className = "r"; tr.cells[2].className = "r"; tr.cells[1].appendChild(meterEl()); });
@@ -538,7 +559,18 @@ function openHost(ip) {
   txt("hName", names[ip] || ip); txt("meta", ip);
   el("vList").className = "hide"; el("vMon").className = "";
   setPeriod(0);
-  refresh();
+  /* local cache first (no SSH): last numbers, chart history and storage breakdown, then a live refresh */
+  busy = true;
+  get("/api/cache?h=" + encodeURIComponent(ip), function (d) {
+    busy = false;
+    if (host !== ip || document.hidden) return;
+    if (!d.err) {
+      if (d.hist) loadHist(d.hist);
+      if (d.disk) { disk = d.disk; nodes.diskTried = 1; }
+      if (d.last && d.last.cpu != null) render(d.last, true); else redraw();
+    }
+    refresh();
+  });
 }
 function showList() { stop(); host = null; setPeriod(0); store("last", null); el("vMon").className = "hide"; el("vList").className = ""; showKnown(null); }
 
